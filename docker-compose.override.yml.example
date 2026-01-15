@@ -1,0 +1,11 @@
+# Пример файла docker-compose.override.yml
+# Скопируйте этот файл в docker-compose.override.yml для локальной разработки
+# docker-compose.override.yml игнорируется git по умолчанию
+
+version: '3.8'
+
+services:
+  bot:
+    volumes:
+      - ./bot:/app/bot  # Монтируем код для разработки
+      - ./logs:/app/logs

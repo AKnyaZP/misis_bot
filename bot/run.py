@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from cw.app import app
+from bot.app import app
 
 if __name__ == "__main__":
     logging.basicConfig(

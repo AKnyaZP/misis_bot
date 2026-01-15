@@ -1,6 +1,5 @@
 
-from huggingface_hub import InferenceClient
-from requests import get_hf_response
+from bot.requests import get_hf_response
 
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
@@ -24,14 +23,14 @@ async def start(message: Message, state: FSMContext):
     await message.answer("Привет! Задавай свой вопрос!)")
 
 @router.message(F.text, RequestCompositing.question)
-async def generate(message: Message, state: FSMContext, hf_client: InferenceClient):
+async def generate(message: Message, state: FSMContext, hf_service):
     await state.set_state(RequestCompositing.generating)
     await message.answer("Начинаю генерацию ответа!")
 
     prompt = message.text
 
     try:
-        response_text = await get_hf_response(prompt, hf_client)
+        response_text = await get_hf_response(prompt, hf_service)
     except Exception as e:
         await message.answer(f"Ошибка при запросе к серверу: {e}")
     else:

@@ -1,8 +1,7 @@
 from aiogram import Dispatcher, Bot
 import logging
-from cw.config import settings
-from cw.handlers import router
-from huggingface_hub import InferenceClient
+from bot.config import settings
+from bot.handlers import router
 
 
 
@@ -14,9 +13,14 @@ async def on_startup(bot: Bot) -> None:
 
 async def app() -> None:
     bot = Bot(token=settings.bot_token)
-    hf_client=InferenceClient(model=settings.hf_model, token=settings.hf_token)
+    
+    from bot.services.hf_service import HFService
+    from bot.middleware import HFServiceMiddleware
+    
+    hf_service = HFService(settings)
 
-    dp=Dispatcher(on_startup=on_startup, hf_client=hf_client)
+    dp = Dispatcher(on_startup=on_startup)
+    dp.message.middleware(HFServiceMiddleware(hf_service))
     dp.include_router(router)
 
     await dp.start_polling(bot)
