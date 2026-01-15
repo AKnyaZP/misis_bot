@@ -5,7 +5,7 @@ from requests import get_hf_response
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram import Router, F
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 
@@ -14,6 +14,7 @@ router = Router()
 # можно добавлять этапы составления или валидации вопроса
 class RequestCompositing(StatesGroup):
     question = State()
+    generating = State()
 
 
 
@@ -24,7 +25,7 @@ async def start(message: Message, state: FSMContext):
 
 @router.message(F.text, RequestCompositing.question)
 async def generate(message: Message, state: FSMContext, hf_client: InferenceClient):
-    await state.set_state('generating')
+    await state.set_state(RequestCompositing.generating)
     await message.answer("Начинаю генерацию ответа!")
 
     prompt = message.text
@@ -38,6 +39,6 @@ async def generate(message: Message, state: FSMContext, hf_client: InferenceClie
     finally:
         await state.clear()
 
-@router.message(StateFilter('generating'))
+@router.message(RequestCompositing.generating)
 async def wait_responce(message : Message) -> None:
     await message.answer("Ожидайте завершения генерации ответа на ваш вопрос")
