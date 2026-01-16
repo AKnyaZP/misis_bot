@@ -8,7 +8,7 @@ from huggingface_hub import InferenceClient
 from langchain_community.llms import HuggingFaceEndpoint
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Qdrant
-from langchain.schema import Document
+from langchain_core.documents import Document
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 from duckduckgo_search import DDGS
@@ -68,11 +68,23 @@ class HFService:
             api_key=self.settings.qdrant_api_key if self.settings.qdrant_api_key else None,
         )
 
-    def _get_vectorstore(self) -> Qdrant:
+    def _get_vectorstore(self) -> Optional[Qdrant]:
         """Get or create Qdrant vectorstore."""
         if self._vectorstore is None:
-            qdrant_client = self._get_qdrant_client()
-            embeddings = self._get_embeddings()
+            try:
+                qdrant_client = self._get_qdrant_client()
+                # Проверяем доступность Qdrant
+                qdrant_client.get_collections()
+            except Exception as e:
+                logger.warning(f"Qdrant недоступен по адресу {self.settings.qdrant_url}: {e}")
+                logger.warning("RAG функциональность будет отключена. Запустите Qdrant для полной функциональности.")
+                return None
+            
+            try:
+                embeddings = self._get_embeddings()
+            except Exception as e:
+                logger.warning(f"Ошибка загрузки embeddings модели: {e}")
+                return None
 
             # Проверяем существование коллекции
             try:
@@ -93,11 +105,15 @@ class HFService:
             except Exception as e:
                 logger.warning(f"Error checking collections: {e}")
 
-            self._vectorstore = Qdrant(
-                client=qdrant_client,
-                collection_name=self.settings.qdrant_collection_name,
-                embeddings=embeddings,
-            )
+            try:
+                self._vectorstore = Qdrant(
+                    client=qdrant_client,
+                    collection_name=self.settings.qdrant_collection_name,
+                    embeddings=embeddings,
+                )
+            except Exception as e:
+                logger.warning(f"Ошибка создания vectorstore: {e}")
+                return None
         return self._vectorstore
 
     async def generate(self, prompt: str, use_rag: bool = True) -> str:
@@ -160,6 +176,19 @@ class HFService:
     async def _generate_with_rag(self, prompt: str) -> str:
         """Generate response using web search and Qdrant cache for Q&A pairs."""
         try:
+            vectorstore = self._get_vectorstore()
+            
+            # Если Qdrant недоступен, используем только веб-поиск
+            if vectorstore is None:
+                logger.info("Qdrant недоступен, используем только веб-поиск")
+                web_docs = await self._web_search_misis(prompt)
+                if not web_docs:
+                    logger.warning("No results from web search, using direct generation")
+                    return await self._generate_direct(prompt)
+                else:
+                    context = "\n\n".join([doc.page_content for doc in web_docs])
+                    return await self._generate_with_context(prompt, context)
+            
             # Сначала проверяем кэш вопрос-ответ в Qdrant
             logger.info(f"Checking Q&A cache for query: {prompt}")
             cached_answer = await self._get_cached_answer(prompt)
@@ -187,15 +216,27 @@ class HFService:
             
             return answer
             
+        except RuntimeError as e:
+            # Пробрасываем RuntimeError с понятными сообщениями
+            raise e
         except Exception as e:
             logger.error(f"Error in RAG generation: {str(e)}")
-            # Fallback to direct generation
+            # Fallback to direct generation только если это не ошибка прав доступа
+            error_str = str(e)
+            if "403" in error_str or "Forbidden" in error_str or "permissions" in error_str.lower():
+                raise RuntimeError(
+                    "Токен HuggingFace не имеет прав для использования Inference API. "
+                    "Создайте новый токен с правами 'read' на https://huggingface.co/settings/tokens"
+                )
             return await self._generate_direct(prompt)
 
     def add_documents(self, texts: List[str], metadatas: Optional[List[dict]] = None):
         """Add documents to Qdrant vectorstore."""
         try:
             vectorstore = self._get_vectorstore()
+            if vectorstore is None:
+                logger.warning("Qdrant недоступен, документы не добавлены")
+                return
             documents = [
                 Document(page_content=text, metadata=meta)
                 for text, meta in zip(texts, metadatas or [{}] * len(texts))
@@ -210,6 +251,9 @@ class HFService:
         """Add LangChain Document objects to Qdrant vectorstore."""
         try:
             vectorstore = self._get_vectorstore()
+            if vectorstore is None:
+                logger.warning("Qdrant недоступен, документы не добавлены")
+                return
             vectorstore.add_documents(documents)
             logger.info(f"Added {len(documents)} documents to vectorstore")
         except Exception as e:
@@ -220,6 +264,8 @@ class HFService:
         """Проверяет кэш вопрос-ответ в Qdrant."""
         try:
             vectorstore = self._get_vectorstore()
+            if vectorstore is None:
+                return None
             question_hash = hashlib.md5(question.encode()).hexdigest()
             
             def _search() -> Optional[str]:
@@ -268,6 +314,9 @@ class HFService:
         """Сохраняет пару вопрос-ответ в кэш Qdrant."""
         try:
             vectorstore = self._get_vectorstore()
+            if vectorstore is None:
+                logger.debug("Qdrant недоступен, пропускаем кэширование")
+                return
             question_hash = hashlib.md5(question.encode()).hexdigest()
             
             # Создаем документ: используем вопрос для эмбеддинга, но сохраняем ответ в content
@@ -449,8 +498,24 @@ class HFService:
             except StopIteration:
                 return ""
             except Exception as e:
-                logger.error(f"Error in _infer: {str(e)}")
-                raise
+                error_str = str(e)
+                logger.error(f"Error in _infer (with context): {error_str}")
+                
+                # Обработка специфичных ошибок HuggingFace API
+                if "403" in error_str or "Forbidden" in error_str:
+                    if "permissions" in error_str.lower() or "Inference Providers" in error_str:
+                        logger.error("Токен HuggingFace не имеет прав для использования Inference API")
+                        logger.error("Решение: создайте токен с правами 'read' на https://huggingface.co/settings/tokens")
+                        raise RuntimeError(
+                            "Токен HuggingFace не имеет достаточных прав для использования Inference API. "
+                            "Создайте новый токен с правами 'read' на https://huggingface.co/settings/tokens"
+                        )
+                    else:
+                        raise RuntimeError("Доступ к HuggingFace API запрещен. Проверьте токен.")
+                elif "401" in error_str or "Unauthorized" in error_str:
+                    raise RuntimeError("Неверный токен HuggingFace. Проверьте HF_TOKEN в bot/.env")
+                else:
+                    raise RuntimeError(f"Ошибка при обращении к модели: {error_str[:200]}")
         
         return await self._run(_infer)
 
@@ -467,6 +532,15 @@ class HFService:
         """Run inference in thread pool."""
         try:
             return await asyncio.to_thread(callable_fn)
+        except RuntimeError as err:
+            # Пробрасываем RuntimeError с понятными сообщениями
+            raise err
         except Exception as err:
             logger.exception(f"Generation error: {err}")
-            raise RuntimeError("Ошибка генерации ответа от модели") from err
+            error_str = str(err)
+            if "403" in error_str or "Forbidden" in error_str:
+                raise RuntimeError(
+                    "Токен HuggingFace не имеет прав для использования Inference API. "
+                    "Создайте новый токен с правами 'read' на https://huggingface.co/settings/tokens"
+                )
+            raise RuntimeError(f"Ошибка генерации ответа от модели: {error_str[:200]}")

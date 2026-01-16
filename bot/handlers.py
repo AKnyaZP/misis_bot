@@ -31,10 +31,9 @@ async def generate(message: Message, state: FSMContext, hf_service):
 
     try:
         response_text = await get_hf_response(prompt, hf_service)
+        await message.answer(response_text)
     except Exception as e:
         await message.answer(f"Ошибка при запросе к серверу: {e}")
-    else:
-        await message.answer(response_text)
     finally:
         await state.clear()
 

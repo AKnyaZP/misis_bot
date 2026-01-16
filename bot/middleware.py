@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Any, Awaitable
+from typing import Callable, Dict, Any, Awaitable, Optional
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
 from bot.services.hf_service import HFService
@@ -7,7 +7,7 @@ from bot.services.hf_service import HFService
 class HFServiceMiddleware(BaseMiddleware):
     """Middleware для передачи HFService в handlers."""
     
-    def __init__(self, hf_service: HFService):
+    def __init__(self, hf_service: Optional[HFService]):
         self.hf_service = hf_service
 
     async def __call__(
