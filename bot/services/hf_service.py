@@ -27,9 +27,8 @@ class HFService:
         self._vectorstore: Optional[Qdrant] = None
 
     def _get_client(self) -> InferenceClient:
-        """Get or create InferenceClient for GPT-oSS-20b."""
+        """Создает или возвращает InferenceClient для модели HuggingFace."""
         if self._client is None:
-            # Используем модель из настроек (GPT-oSS-20b или другую)
             model_id = self.settings.hf_model
             self._client = InferenceClient(
                 model=model_id,
@@ -38,7 +37,7 @@ class HFService:
         return self._client
 
     def _get_llm(self) -> HuggingFaceEndpoint:
-        """Get or create LangChain HuggingFaceEndpoint."""
+        """Создает или возвращает LangChain HuggingFaceEndpoint."""
         if self._llm is None:
             model_id = self.settings.hf_model
             self._llm = HuggingFaceEndpoint(
@@ -53,7 +52,7 @@ class HFService:
         return self._llm
 
     def _get_embeddings(self) -> HuggingFaceEmbeddings:
-        """Get or create embeddings model."""
+        """Создает или возвращает модель эмбеддингов."""
         if self._embeddings is None:
             self._embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -62,31 +61,29 @@ class HFService:
         return self._embeddings
 
     def _get_qdrant_client(self) -> QdrantClient:
-        """Get or create Qdrant client."""
+        """Создает клиент Qdrant."""
         return QdrantClient(
             url=self.settings.qdrant_url,
             api_key=self.settings.qdrant_api_key if self.settings.qdrant_api_key else None,
         )
 
     def _get_vectorstore(self) -> Optional[Qdrant]:
-        """Get or create Qdrant vectorstore."""
+        """Создает или возвращает векторное хранилище Qdrant."""
         if self._vectorstore is None:
             try:
                 qdrant_client = self._get_qdrant_client()
-                # Проверяем доступность Qdrant
                 qdrant_client.get_collections()
             except Exception as e:
                 logger.warning(f"Qdrant недоступен по адресу {self.settings.qdrant_url}: {e}")
-                logger.warning("RAG функциональность будет отключена. Запустите Qdrant для полной функциональности.")
+                logger.warning("RAG функциональность будет отключена.")
                 return None
             
             try:
                 embeddings = self._get_embeddings()
             except Exception as e:
-                logger.warning(f"Ошибка загрузки embeddings модели: {e}")
+                logger.warning(f"Ошибка загрузки модели эмбеддингов: {e}")
                 return None
 
-            # Проверяем существование коллекции
             try:
                 collections = qdrant_client.get_collections()
                 collection_exists = any(
@@ -94,16 +91,15 @@ class HFService:
                     for col in collections.collections
                 )
                 if not collection_exists:
-                    # Создаем коллекцию если её нет
                     qdrant_client.create_collection(
                         collection_name=self.settings.qdrant_collection_name,
                         vectors_config=VectorParams(
-                            size=384,  # Размер для paraphrase-multilingual-MiniLM-L12-v2
+                            size=384,
                             distance=Distance.COSINE,
                         ),
                     )
             except Exception as e:
-                logger.warning(f"Error checking collections: {e}")
+                logger.warning(f"Ошибка проверки коллекций: {e}")
 
             try:
                 self._vectorstore = Qdrant(
@@ -117,37 +113,27 @@ class HFService:
         return self._vectorstore
 
     async def generate(self, prompt: str, use_rag: bool = True) -> str:
-        """
-        Generate response using HF model.
-        
-        Args:
-            prompt: User prompt
-            use_rag: If True, use RAG with Qdrant vectorstore (default: True)
-        """
+        """Генерирует ответ используя модель HuggingFace."""
         if use_rag:
             return await self._generate_with_rag(prompt)
         else:
             return await self._generate_direct(prompt)
 
     async def _generate_direct(self, prompt: str) -> str:
-        """Generate response directly using InferenceClient (as in example)."""
+        """Генерирует ответ напрямую через InferenceClient."""
         client = self._get_client()
 
         def _infer() -> str:
             try:
-                system_instructions = (
-                    "Ты русскоязычный ассистент для студентов и абитуриентов Университета МИСИС. "
-                    "Помогай отвечать на вопросы об университете, образовательных программах, "
-                    "поступлении, студенческой жизни и других аспектах университета. "
-                    "Отвечай кратко, информативно и по делу. "
-                    "Если не знаешь ответа, честно скажи об этом."
+                system_prompt = (
+                    "Ты ассистент для студентов и абитуриентов Университета МИСИС. "
+                    "Отвечай на вопросы об университете, программах, поступлении и студенческой жизни. "
+                    "Будь кратким и информативным. Если не знаешь ответа, так и скажи."
                 )
                 messages = [
-                    {"role": "system", "content": system_instructions},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ]
-
-                logger.debug(f"Calling chat_completion with messages={messages}")
 
                 result = client.chat_completion(
                     messages=messages,
@@ -155,73 +141,52 @@ class HFService:
                     temperature=self.settings.temperature,
                 )
 
-                logger.debug(f"Raw result: {result}")
-
-                # Extract the assistant's reply
                 if hasattr(result, "choices") and result.choices:
                     content = result.choices[0].message.content
-                    logger.info(f"Extracted content: '{content}'")
                     return content if content else ""
 
-                logger.warning(f"Result has no choices: {result}")
+                logger.warning(f"Неожиданный формат ответа: {result}")
                 return str(result)
             except StopIteration:
                 return ""
             except Exception as e:
-                logger.error(f"Error in _infer: {str(e)}")
+                logger.error(f"Ошибка в _infer: {str(e)}")
                 raise
 
         return await self._run(_infer)
 
     async def _generate_with_rag(self, prompt: str) -> str:
-        """Generate response using web search and Qdrant cache for Q&A pairs."""
+        """Генерирует ответ используя веб-поиск и кэш Q&A в Qdrant."""
         try:
             vectorstore = self._get_vectorstore()
             
-            # Если Qdrant недоступен, используем только веб-поиск
             if vectorstore is None:
                 logger.info("Qdrant недоступен, используем только веб-поиск")
                 web_docs = await self._web_search_misis(prompt)
                 if not web_docs:
-                    logger.warning("No results from web search, using direct generation")
                     return await self._generate_direct(prompt)
-                else:
-                    context = "\n\n".join([doc.page_content for doc in web_docs])
-                    return await self._generate_with_context(prompt, context)
+                context = "\n\n".join([doc.page_content for doc in web_docs])
+                return await self._generate_with_context(prompt, context)
             
-            # Сначала проверяем кэш вопрос-ответ в Qdrant
-            logger.info(f"Checking Q&A cache for query: {prompt}")
             cached_answer = await self._get_cached_answer(prompt)
-            
             if cached_answer:
-                logger.info("Found cached answer")
                 return cached_answer
             
-            # Если кэш пуст, делаем веб-поиск по misis.ru
-            logger.info("Cache empty, performing web search on misis.ru")
             web_docs = await self._web_search_misis(prompt)
-            
             if not web_docs:
-                logger.warning("No results from web search, using direct generation")
                 answer = await self._generate_direct(prompt)
             else:
-                # Формируем контекст из результатов поиска
                 context = "\n\n".join([doc.page_content for doc in web_docs])
-                # Генерируем ответ на основе контекста
                 answer = await self._generate_with_context(prompt, context)
             
-            # Сохраняем пару вопрос-ответ в кэш
-            logger.info("Saving Q&A pair to cache")
             await self._cache_qa_pair(prompt, answer)
             
             return answer
             
         except RuntimeError as e:
-            # Пробрасываем RuntimeError с понятными сообщениями
             raise e
         except Exception as e:
-            logger.error(f"Error in RAG generation: {str(e)}")
-            # Fallback to direct generation только если это не ошибка прав доступа
+            logger.error(f"Ошибка в RAG генерации: {str(e)}")
             error_str = str(e)
             if "403" in error_str or "Forbidden" in error_str or "permissions" in error_str.lower():
                 raise RuntimeError(
@@ -231,7 +196,7 @@ class HFService:
             return await self._generate_direct(prompt)
 
     def add_documents(self, texts: List[str], metadatas: Optional[List[dict]] = None):
-        """Add documents to Qdrant vectorstore."""
+        """Добавляет документы в векторное хранилище Qdrant."""
         try:
             vectorstore = self._get_vectorstore()
             if vectorstore is None:
@@ -242,22 +207,22 @@ class HFService:
                 for text, meta in zip(texts, metadatas or [{}] * len(texts))
             ]
             vectorstore.add_documents(documents)
-            logger.info(f"Added {len(texts)} documents to vectorstore")
+            logger.info(f"Добавлено {len(texts)} документов в векторное хранилище")
         except Exception as e:
-            logger.error(f"Error adding documents: {str(e)}")
+            logger.error(f"Ошибка добавления документов: {str(e)}")
             raise
 
     def add_langchain_documents(self, documents: List[Document]):
-        """Add LangChain Document objects to Qdrant vectorstore."""
+        """Добавляет LangChain Document объекты в векторное хранилище."""
         try:
             vectorstore = self._get_vectorstore()
             if vectorstore is None:
                 logger.warning("Qdrant недоступен, документы не добавлены")
                 return
             vectorstore.add_documents(documents)
-            logger.info(f"Added {len(documents)} documents to vectorstore")
+            logger.info(f"Добавлено {len(documents)} документов в векторное хранилище")
         except Exception as e:
-            logger.error(f"Error adding documents: {str(e)}")
+            logger.error(f"Ошибка добавления документов: {str(e)}")
             raise
 
     async def _get_cached_answer(self, question: str) -> Optional[str]:
@@ -295,12 +260,11 @@ class HFService:
             
             return await asyncio.to_thread(_search)
         except Exception as e:
-            logger.error(f"Error checking cache: {str(e)}")
+            logger.error(f"Ошибка проверки кэша: {str(e)}")
             return None
 
     def _questions_similar(self, q1: str, q2: str, threshold: float = 0.8) -> bool:
-        """Проверяет, похожи ли два вопроса (простая проверка по словам)."""
-        # Простая проверка: если больше 80% слов совпадают
+        """Проверяет схожесть двух вопросов по словам."""
         words1 = set(q1.lower().split())
         words2 = set(q2.lower().split())
         if not words1 or not words2:
@@ -319,50 +283,33 @@ class HFService:
                 return
             question_hash = hashlib.md5(question.encode()).hexdigest()
             
-            # Создаем документ: используем вопрос для эмбеддинга, но сохраняем ответ в content
-            # Это позволяет искать по вопросу, но получать ответ
-            doc = Document(
-                page_content=answer,  # Сохраняем ответ
-                metadata={
-                    'question': question,
-                    'question_hash': question_hash,
-                    'type': 'qa_pair',
-                    'source': 'web_search_cache'
-                }
-            )
-            
-            # Для эмбеддинга используем вопрос, но сохраняем ответ
-            # Создаем временный документ с вопросом для эмбеддинга
-            question_doc = Document(
-                page_content=question,
-                metadata=doc.metadata
-            )
+            metadata = {
+                'question': question,
+                'question_hash': question_hash,
+                'type': 'qa_pair',
+                'source': 'web_search_cache'
+            }
             
             def _add():
-                # Добавляем документ, эмбеддинг будет создан из page_content (вопроса)
-                # Но мы хотим использовать вопрос для поиска, а ответ для хранения
-                # Поэтому создаем документ с комбинацией вопрос + ответ для эмбеддинга
                 combined_content = f"Вопрос: {question}\nОтвет: {answer}"
                 combined_doc = Document(
                     page_content=combined_content,
-                    metadata=doc.metadata
+                    metadata=metadata
                 )
                 vectorstore.add_documents([combined_doc])
             
             await asyncio.to_thread(_add)
-            logger.info(f"Cached Q&A pair for question hash: {question_hash[:8]}...")
+            logger.info(f"Закэширована пара Q&A для хеша вопроса: {question_hash[:8]}...")
         except Exception as e:
-            logger.error(f"Error caching Q&A pair: {str(e)}")
+            logger.error(f"Ошибка кэширования пары Q&A: {str(e)}")
 
     async def _web_search_misis(self, query: str, max_results: int = 5) -> List[Document]:
         """Выполняет веб-поиск по домену misis.ru и извлекает контент."""
         try:
-            # Формируем запрос с ограничением по домену
             search_query = f"site:misis.ru {query}"
-            logger.info(f"Searching web with query: {search_query}")
+            logger.info(f"Поиск в интернете: {search_query}")
             
             def _search() -> List[dict]:
-                """Синхронный поиск через DuckDuckGo."""
                 try:
                     with DDGS() as ddgs:
                         results = list(ddgs.text(
@@ -372,16 +319,14 @@ class HFService:
                         ))
                     return results
                 except Exception as e:
-                    logger.error(f"Error in DuckDuckGo search: {str(e)}")
+                    logger.error(f"Ошибка поиска в DuckDuckGo: {str(e)}")
                     return []
             
             search_results = await asyncio.to_thread(_search)
             
             if not search_results:
-                logger.warning("No search results found")
                 return []
             
-            # Извлекаем контент со страниц
             documents = []
             async with aiohttp.ClientSession() as session:
                 for result in search_results:
@@ -393,14 +338,8 @@ class HFService:
                         continue
                     
                     try:
-                        # Пытаемся получить полный контент со страницы
                         content = await self._fetch_page_content(session, url)
-                        if content:
-                            # Используем полный контент, если удалось получить
-                            text = content
-                        else:
-                            # Иначе используем snippet из результатов поиска
-                            text = f"{title}\n{snippet}"
+                        text = content if content else f"{title}\n{snippet}"
                         
                         doc = Document(
                             page_content=text,
@@ -413,8 +352,7 @@ class HFService:
                         )
                         documents.append(doc)
                     except Exception as e:
-                        logger.warning(f"Error fetching content from {url}: {str(e)}")
-                        # Используем snippet как fallback
+                        logger.warning(f"Ошибка получения контента с {url}: {str(e)}")
                         doc = Document(
                             page_content=f"{title}\n{snippet}",
                             metadata={
@@ -426,11 +364,11 @@ class HFService:
                         )
                         documents.append(doc)
             
-            logger.info(f"Extracted {len(documents)} documents from web search")
+            logger.info(f"Извлечено {len(documents)} документов из веб-поиска")
             return documents
             
         except Exception as e:
-            logger.error(f"Error in web search: {str(e)}")
+            logger.error(f"Ошибка веб-поиска: {str(e)}")
             return []
 
     async def _fetch_page_content(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
@@ -441,18 +379,14 @@ class HFService:
                     html = await response.text()
                     soup = BeautifulSoup(html, 'lxml')
                     
-                    # Удаляем скрипты и стили
                     for script in soup(["script", "style", "nav", "header", "footer"]):
                         script.decompose()
                     
-                    # Извлекаем текст
                     text = soup.get_text()
-                    # Очищаем от лишних пробелов
                     lines = (line.strip() for line in text.splitlines())
                     chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
                     text = ' '.join(chunk for chunk in chunks if chunk)
                     
-                    # Ограничиваем размер (первые 2000 символов)
                     if len(text) > 2000:
                         text = text[:2000] + "..."
                     
@@ -472,12 +406,11 @@ class HFService:
                     "Используй следующий контекст из официального сайта университета для ответа на вопрос. "
                     "Если в контексте нет полного ответа, можешь дополнить своими знаниями, но приоритет отдавай информации из контекста."
                 )
+                user_prompt = f"Контекст из сайта МИСИС:\n{context}\n\nВопрос: {prompt}\n\nОтветь на основе контекста:"
                 messages = [
                     {"role": "system", "content": system_instructions},
-                    {"role": "user", "content": f"Контекст из сайта МИСИС:\n{context}\n\nВопрос пользователя: {prompt}\n\nДай развернутый и полезный ответ на основе контекста:"},
+                    {"role": "user", "content": user_prompt},
                 ]
-                
-                logger.debug(f"Calling chat_completion with context")
                 
                 result = client.chat_completion(
                     messages=messages,
@@ -485,23 +418,18 @@ class HFService:
                     temperature=self.settings.temperature,
                 )
                 
-                logger.debug(f"Raw result: {result}")
-                
-                # Extract the assistant's reply
                 if hasattr(result, "choices") and result.choices:
                     content = result.choices[0].message.content
-                    logger.info(f"Extracted content: '{content[:100]}...'")
                     return self.clean_output(content) if content else ""
                 
-                logger.warning(f"Result has no choices: {result}")
+                logger.warning(f"Неожиданный формат ответа: {result}")
                 return str(result)
             except StopIteration:
                 return ""
             except Exception as e:
                 error_str = str(e)
-                logger.error(f"Error in _infer (with context): {error_str}")
+                logger.error(f"Ошибка в _infer (с контекстом): {error_str}")
                 
-                # Обработка специфичных ошибок HuggingFace API
                 if "403" in error_str or "Forbidden" in error_str:
                     if "permissions" in error_str.lower() or "Inference Providers" in error_str:
                         logger.error("Токен HuggingFace не имеет прав для использования Inference API")
@@ -521,7 +449,7 @@ class HFService:
 
     @staticmethod
     def clean_output(text: str) -> str:
-        """Clean output text."""
+        """Очищает вывод от префиксов."""
         cleaned = text.strip()
         cleaned = re.sub(r"^Ассистент:\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"^Assistant:\s*", "", cleaned, flags=re.IGNORECASE)
@@ -529,14 +457,13 @@ class HFService:
 
     @staticmethod
     async def _run(callable_fn: Callable[[], str]) -> str:
-        """Run inference in thread pool."""
+        """Выполняет инференс в отдельном потоке."""
         try:
             return await asyncio.to_thread(callable_fn)
         except RuntimeError as err:
-            # Пробрасываем RuntimeError с понятными сообщениями
             raise err
         except Exception as err:
-            logger.exception(f"Generation error: {err}")
+            logger.exception(f"Ошибка генерации: {err}")
             error_str = str(err)
             if "403" in error_str or "Forbidden" in error_str:
                 raise RuntimeError(

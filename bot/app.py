@@ -17,7 +17,6 @@ async def app() -> None:
     
     logger.info("Проверка конфигурации...")
     
-    # Диагностика: показываем откуда загружается токен
     env_file = Path(__file__).parent / ".env"
     env_token = os.getenv("BOT_TOKEN")
     
@@ -28,7 +27,6 @@ async def app() -> None:
                 env_content = f.read()
                 bot_token_line = [line for line in env_content.split('\n') if line.strip().startswith('BOT_TOKEN=')]
                 if bot_token_line:
-                    # Показываем только первые и последние символы токена для безопасности
                     token_preview = bot_token_line[0][:20] + "..." if len(bot_token_line[0]) > 20 else bot_token_line[0]
                     logger.info(f"Строка BOT_TOKEN в .env: {token_preview}")
                     if 'BOT_TOKEN=' in bot_token_line[0] and len(bot_token_line[0].split('=', 1)) > 1:
@@ -70,7 +68,6 @@ async def app() -> None:
     logger.info("Подключение к Telegram...")
     try:
         bot = Bot(token=settings.bot_token)
-        # Проверяем валидность токена
         bot_info = await bot.get_me()
         logger.info("=" * 50)
         logger.info(f"✓ Бот успешно подключен: @{bot_info.username}")

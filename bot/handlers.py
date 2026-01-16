@@ -10,7 +10,6 @@ from aiogram.types import Message
 
 router = Router()
 
-# можно добавлять этапы составления или валидации вопроса
 class RequestCompositing(StatesGroup):
     question = State()
     generating = State()

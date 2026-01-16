@@ -5,14 +5,7 @@ from bot.services.hf_service import HFService
 logger = logging.getLogger(__name__)
 
 async def get_hf_response(prompt: str, hf_service: Optional[HFService], use_rag: bool = True) -> str:
-    """
-    Get response from HF service.
-    
-    Args:
-        prompt: User prompt
-        hf_service: HFService instance (может быть None)
-        use_rag: If True, use RAG with Qdrant (default: False)
-    """
+    """Получает ответ от сервиса HuggingFace."""
     if hf_service is None:
         return "Извините, сервис генерации ответов недоступен. Проверьте настройки BOT_TOKEN и HF_TOKEN в bot/.env"
     
@@ -20,11 +13,8 @@ async def get_hf_response(prompt: str, hf_service: Optional[HFService], use_rag:
         result = await hf_service.generate(prompt, use_rag=use_rag)
         return result
     except RuntimeError as e:
-        # RuntimeError содержит понятные сообщения для пользователя
         error_msg = str(e)
         logger.error(f"Ошибка генерации ответа: {error_msg}")
-        
-        # Форматируем сообщение для пользователя
         if "Токен HuggingFace не имеет прав" in error_msg:
             return (
                 "⚠️ Ошибка доступа к модели.\n\n"
