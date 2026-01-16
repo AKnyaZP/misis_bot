@@ -40,29 +40,6 @@ services:
       - ./logs:/app/logs
     command: python -m bot.run
 
-  # Парсер запускается только по требованию: docker-compose run --rm parser
-  parser:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    profiles:
-      - tools  # Запускается только с профилем tools
-    depends_on:
-      qdrant:
-        condition: service_healthy
-    environment:
-      - BOT_TOKEN=${BOT_TOKEN}
-      - HF_MODEL=${HF_MODEL:-Qwen/Qwen2.5-7B-Instruct}
-      - HF_TOKEN=${HF_TOKEN}
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
-      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-misis_bot_vectors}
-      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
-      - TEMPERATURE=${TEMPERATURE:-0.7}
-    restart: "no"
-    volumes:
-      - ./logs:/app/logs
-    command: python -m bot.scripts.parse_misis
 
 volumes:
   qdrant_storage:

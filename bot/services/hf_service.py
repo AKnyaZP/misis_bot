@@ -8,8 +8,6 @@ from huggingface_hub import InferenceClient
 from langchain_community.llms import HuggingFaceEndpoint
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Qdrant
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
@@ -27,7 +25,6 @@ class HFService:
         self._llm: Optional[HuggingFaceEndpoint] = None
         self._embeddings: Optional[HuggingFaceEmbeddings] = None
         self._vectorstore: Optional[Qdrant] = None
-        self._qa_chain: Optional[RetrievalQA] = None
 
     def _get_client(self) -> InferenceClient:
         """Get or create InferenceClient for GPT-oSS-20b."""
@@ -103,37 +100,6 @@ class HFService:
             )
         return self._vectorstore
 
-    def _get_qa_chain(self) -> RetrievalQA:
-        """Get or create RetrievalQA chain."""
-        if self._qa_chain is None:
-            llm = self._get_llm()
-            vectorstore = self._get_vectorstore()
-
-            prompt_template = """Ты ассистент для студентов и абитуриентов Университета МИСИС. 
-Используй следующий контекст из официального сайта университета для ответа на вопрос.
-Если в контексте нет полного ответа, можешь дополнить своими знаниями, но приоритет отдавай информации из контекста.
-
-Контекст из сайта МИСИС:
-{context}
-
-Вопрос пользователя: {question}
-
-Дай развернутый и полезный ответ на основе контекста:"""
-
-            PROMPT = PromptTemplate(
-                template=prompt_template,
-                input_variables=["context", "question"]
-            )
-
-            self._qa_chain = RetrievalQA.from_chain_type(
-                llm=llm,
-                chain_type="stuff",
-                retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
-                chain_type_kwargs={"prompt": PROMPT},
-                return_source_documents=True,
-            )
-        return self._qa_chain
-
     async def generate(self, prompt: str, use_rag: bool = True) -> str:
         """
         Generate response using HF model.
@@ -192,32 +158,34 @@ class HFService:
         return await self._run(_infer)
 
     async def _generate_with_rag(self, prompt: str) -> str:
-        """Generate response using RAG with web search and Qdrant cache."""
+        """Generate response using web search and Qdrant cache for Q&A pairs."""
         try:
-            # Сначала проверяем кэш в Qdrant
-            logger.info(f"Checking cache for query: {prompt}")
-            cached_docs = await self.semantic_search(prompt, k=3)
+            # Сначала проверяем кэш вопрос-ответ в Qdrant
+            logger.info(f"Checking Q&A cache for query: {prompt}")
+            cached_answer = await self._get_cached_answer(prompt)
             
-            # Если в кэше есть релевантные результаты, используем их
-            if cached_docs and len(cached_docs) > 0:
-                logger.info(f"Found {len(cached_docs)} cached documents")
-                context = "\n\n".join([doc.page_content for doc in cached_docs])
+            if cached_answer:
+                logger.info("Found cached answer")
+                return cached_answer
+            
+            # Если кэш пуст, делаем веб-поиск по misis.ru
+            logger.info("Cache empty, performing web search on misis.ru")
+            web_docs = await self._web_search_misis(prompt)
+            
+            if not web_docs:
+                logger.warning("No results from web search, using direct generation")
+                answer = await self._generate_direct(prompt)
             else:
-                # Если кэш пуст, делаем веб-поиск
-                logger.info("Cache empty, performing web search")
-                web_docs = await self._web_search_misis(prompt)
-                
-                if web_docs:
-                    # Сохраняем результаты в кэш
-                    logger.info(f"Saving {len(web_docs)} documents to cache")
-                    await asyncio.to_thread(self.add_langchain_documents, web_docs)
-                    context = "\n\n".join([doc.page_content for doc in web_docs])
-                else:
-                    logger.warning("No results from web search, using direct generation")
-                    return await self._generate_direct(prompt)
+                # Формируем контекст из результатов поиска
+                context = "\n\n".join([doc.page_content for doc in web_docs])
+                # Генерируем ответ на основе контекста
+                answer = await self._generate_with_context(prompt, context)
             
-            # Генерируем ответ на основе контекста
-            return await self._generate_with_context(prompt, context)
+            # Сохраняем пару вопрос-ответ в кэш
+            logger.info("Saving Q&A pair to cache")
+            await self._cache_qa_pair(prompt, answer)
+            
+            return answer
             
         except Exception as e:
             logger.error(f"Error in RAG generation: {str(e)}")
@@ -248,19 +216,94 @@ class HFService:
             logger.error(f"Error adding documents: {str(e)}")
             raise
 
-    async def semantic_search(self, query: str, k: int = 5) -> List[Document]:
-        """Выполняет семантический поиск по Qdrant (кэш)."""
+    async def _get_cached_answer(self, question: str) -> Optional[str]:
+        """Проверяет кэш вопрос-ответ в Qdrant."""
         try:
             vectorstore = self._get_vectorstore()
+            question_hash = hashlib.md5(question.encode()).hexdigest()
             
-            def _search() -> List[Document]:
-                results = vectorstore.similarity_search(query, k=k)
-                return results
+            def _search() -> Optional[str]:
+                # Ищем похожие вопросы через семантический поиск
+                results = vectorstore.similarity_search(question, k=3)
+                for doc in results:
+                    metadata = doc.metadata
+                    # Проверяем, что это кэшированная пара вопрос-ответ
+                    if metadata.get('type') == 'qa_pair':
+                        # Проверяем точное совпадение хеша
+                        if metadata.get('question_hash') == question_hash:
+                            # Извлекаем ответ из page_content (формат: "Вопрос: ...\nОтвет: ...")
+                            content = doc.page_content
+                            if "Ответ:" in content:
+                                answer = content.split("Ответ:")[-1].strip()
+                                return answer
+                            return content
+                        # Если вопрос очень похож, тоже возвращаем
+                        cached_question = metadata.get('question', '')
+                        if cached_question and self._questions_similar(question, cached_question):
+                            content = doc.page_content
+                            if "Ответ:" in content:
+                                answer = content.split("Ответ:")[-1].strip()
+                                return answer
+                            return content
+                return None
             
             return await asyncio.to_thread(_search)
         except Exception as e:
-            logger.error(f"Error in semantic search: {str(e)}")
-            return []
+            logger.error(f"Error checking cache: {str(e)}")
+            return None
+
+    def _questions_similar(self, q1: str, q2: str, threshold: float = 0.8) -> bool:
+        """Проверяет, похожи ли два вопроса (простая проверка по словам)."""
+        # Простая проверка: если больше 80% слов совпадают
+        words1 = set(q1.lower().split())
+        words2 = set(q2.lower().split())
+        if not words1 or not words2:
+            return False
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        similarity = len(intersection) / len(union) if union else 0
+        return similarity >= threshold
+
+    async def _cache_qa_pair(self, question: str, answer: str) -> None:
+        """Сохраняет пару вопрос-ответ в кэш Qdrant."""
+        try:
+            vectorstore = self._get_vectorstore()
+            question_hash = hashlib.md5(question.encode()).hexdigest()
+            
+            # Создаем документ: используем вопрос для эмбеддинга, но сохраняем ответ в content
+            # Это позволяет искать по вопросу, но получать ответ
+            doc = Document(
+                page_content=answer,  # Сохраняем ответ
+                metadata={
+                    'question': question,
+                    'question_hash': question_hash,
+                    'type': 'qa_pair',
+                    'source': 'web_search_cache'
+                }
+            )
+            
+            # Для эмбеддинга используем вопрос, но сохраняем ответ
+            # Создаем временный документ с вопросом для эмбеддинга
+            question_doc = Document(
+                page_content=question,
+                metadata=doc.metadata
+            )
+            
+            def _add():
+                # Добавляем документ, эмбеддинг будет создан из page_content (вопроса)
+                # Но мы хотим использовать вопрос для поиска, а ответ для хранения
+                # Поэтому создаем документ с комбинацией вопрос + ответ для эмбеддинга
+                combined_content = f"Вопрос: {question}\nОтвет: {answer}"
+                combined_doc = Document(
+                    page_content=combined_content,
+                    metadata=doc.metadata
+                )
+                vectorstore.add_documents([combined_doc])
+            
+            await asyncio.to_thread(_add)
+            logger.info(f"Cached Q&A pair for question hash: {question_hash[:8]}...")
+        except Exception as e:
+            logger.error(f"Error caching Q&A pair: {str(e)}")
 
     async def _web_search_misis(self, query: str, max_results: int = 5) -> List[Document]:
         """Выполняет веб-поиск по домену misis.ru и извлекает контент."""
